@@ -6,6 +6,9 @@ submitted by:
     Adrian Rodriguez - 332045
     Pranav Kelkar    - 334722
 """
+import argparse
+from warnings import simplefilter
+
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import NMF, TruncatedSVD
@@ -40,7 +43,7 @@ def preprocess_csv(train_filepath, test_filepath, weight=0.4):
                         len(train_ratings_original) + len(test_ratings_original)
                     ))
 
-    # Create the complete dataframe first (to make `Z_est` and `Z_test` the same size)
+    # Create the complete dataframe first (to make `z_est_svd2` and `Z_test` the same size)
     train_ratings = pd.concat([train_ratings_original, test_ratings_original], ignore_index=True)
     test_ratings = train_ratings.copy()
 
@@ -71,7 +74,7 @@ def preprocess_csv(train_filepath, test_filepath, weight=0.4):
 
 def predictions(W, H):
     """
-    Outputs Z_est given W and H
+    Outputs z_est_svd2 given W and H
     Parameters
     ----------
         W : numpy.ndarray
@@ -118,11 +121,11 @@ def svd2(Z, nan_indices=[], num_features=10):
     VT = svd.components_
     svd_W = svd.transform(Z) / svd.singular_values_
     svd_H = Sigma2 @ VT
-    Z_est = svd_W @ svd_H
+    z_est_svd2 = svd_W @ svd_H
 
-    # Step 2: Change NaNs to values from Z_est
+    # Step 2: Change NaNs to values from z_est_svd2
     Z_svd2 = Z.copy()
-    Z_svd2[nan_indices] = Z_est[nan_indices]
+    Z_svd2[nan_indices] = z_est_svd2[nan_indices]
 
     svd = TruncatedSVD(n_components=num_features)
     svd.fit(Z_svd2)
@@ -133,3 +136,78 @@ def svd2(Z, nan_indices=[], num_features=10):
     svd_est = svd_W @ svd_H
 
     return svd_est
+
+def sgd(Z, Z_test, epochs=50, features=25, lr=0.001, alpha=0.01, epsilon=0.001):
+    """
+    Performs SGD on a given Z matrix, and returns the estimate.
+    Parameters
+    ----------
+        Z : numpy.ndarray
+            Matrix with train values
+        Z_test : numpy.ndarray
+            Matrix with test values
+        epochs : int, OPTIONAL
+            Number of iterations for gradient descent (default is 50)
+        features : int, OPTIONAL
+            Number of features to reduce to (default is 25)
+        lr : float, OPTIONAL
+            Learning rate of SGD (default is 0.01)
+        alpha : float, OPTIONAL
+            L2 regularisation constant (default is 0.01)
+        epsilon : float, OPTIONAL
+            Stopping criteria (default is 0.001)
+    """
+    m, n = Z.shape
+    Z[np.isnan(Z)] = 0
+
+    # Random Start
+    W = 0.5 * np.random.rand(features, m)
+    H = 0.5 * np.random.rand(features, n)
+
+    min_model = predictions(W, H)
+    min_loss = np.inf
+
+    loss_test_errors = []
+    users, movies = Z.nonzero()
+    for epoch in range(epochs):
+        for u, i in zip(users, movies):
+            error = Z[u, i] - predictions(W[:, u], H[:, i])
+            W[:, u] += lr * (error * 2*H[:, i] - 2*alpha * W[:, u])
+            H[:, i] += lr * (error * 2*W[:, u] - 2*alpha * H[:, i])
+        loss_test = rmse(Z_test, predictions(W, H))
+        loss_test_errors.append(loss_test)
+
+        if loss_test < min_loss: # Save only the best W and H
+            min_loss = loss_test
+            min_model = predictions(W, H)
+
+        if epoch > 1 and loss_test_errors[-2] - loss_test_errors[-1] < epsilon:
+            # Updating Learning Rate when reaching a Plateau
+            lr = lr * 0.1
+            # Breaking when Learning Rate is close to 0
+            if lr < epsilon * 0.0001:
+                break
+
+        
+
+    return min_model
+
+# Ignore warning for np.nanmean on columns with all nans
+simplefilter("ignore", category=RuntimeWarning)
+# Ignore warnings for convergence and deprecation (caused by NMF)
+simplefilter("ignore", category=ConvergenceWarning)
+simplefilter("ignore", category=FutureWarning)
+
+# Getting the train and test matrix
+Z_wmeans, Z_train, Z_test = preprocess_csv('train_ratings.csv', 'test_ratings.csv')
+
+# Estimating with SVD2
+Z_est_svd2 = svd2(Z_wmeans, nan_indices=np.where(np.isnan(Z_train)))
+test_rmse_svd2 = rmse(Z_test, Z_est_svd2)
+
+# Estimating with SGD
+Z_est_sgd = sgd(Z_train, Z_test)
+test_rmse_sgd = rmse(Z_test, Z_est_sgd)
+
+# Results
+print(f'RMSE using SVD2 is {test_rmse_svd2} and using SGD is {test_rmse_sgd}')
